@@ -432,6 +432,7 @@ private:
 
         bool auto_failover;                 /* Automatic master failover enabled? */
         bool auto_rejoin;                   /* Automatic rejoin enabled? */
+        std::string rejoin_channel;         /* Slave channel name to use during rejoin. Empty = default. */
         bool switchover_on_low_disk_space;  /* Automatically switch over a master low on disk space */
         bool maintenance_on_low_disk_space; /* Automatically set slave and unreplicating servers low
                                              * on disk space to maintenance. */

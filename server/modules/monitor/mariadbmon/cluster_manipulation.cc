@@ -686,23 +686,76 @@ uint32_t MariaDBMonitor::do_rejoin(GeneralOpData& op, const ServerArray& joinabl
                 MXB_NOTICE("Server '%s' is replicating from a server other than '%s', "
                            "redirecting it to '%s'.",
                            name, master_name, master_name);
-                // Multisource replication does not get to this point unless enforce_simple_topology is
-                // enabled. If multisource replication is used, we must remove the excess connections.
-                mxb_assert(joinable->m_slave_status.size() == 1 || m_settings.enforce_simple_topology);
 
-                if (joinable->m_slave_status.size() > 1)
+                const string& chan = m_settings.rejoin_channel;
+                if (chan.empty())
                 {
-                    SlaveStatusArray extra_conns(std::next(joinable->m_slave_status.begin()),
-                                                 joinable->m_slave_status.end());
+                    // Default behavior: redirect [0], remove excess only when enforce_simple_topology.
+                    // Multisource replication does not get to this point unless enforce_simple_topology
+                    // is enabled. If multisource replication is used, we must remove the excess.
+                    mxb_assert(joinable->m_slave_status.size() == 1
+                               || m_settings.enforce_simple_topology);
 
-                    MXB_NOTICE("Erasing %lu replication connections(s) from server '%s'.",
-                               extra_conns.size(), name);
-                    joinable->remove_slave_conns(op, extra_conns);
+                    if (joinable->m_slave_status.size() > 1)
+                    {
+                        SlaveStatusArray extra_conns(std::next(joinable->m_slave_status.begin()),
+                                                     joinable->m_slave_status.end());
+
+                        MXB_NOTICE("Erasing %lu replication connections(s) from server '%s'.",
+                                   extra_conns.size(), name);
+                        joinable->remove_slave_conns(op, extra_conns);
+                    }
+
+                    auto slave_settings = joinable->m_slave_status[0].settings;
+                    fix_gtid_mode(slave_settings.gtid_mode);
+                    op_success = joinable->redirect_existing_slave_conn(op, slave_settings, m_master);
                 }
+                else
+                {
+                    // rejoin_channel is set: find the named channel, leave all others untouched.
+                    SlaveStatus* match = nullptr;
+                    for (auto& ss : joinable->m_slave_status)
+                    {
+                        if (ss.settings.name == chan)
+                        {
+                            match = &ss;
+                            break;
+                        }
+                    }
 
-                auto slave_settings = joinable->m_slave_status[0].settings;
-                fix_gtid_mode(slave_settings.gtid_mode);
-                op_success = joinable->redirect_existing_slave_conn(op, slave_settings, m_master);
+                    // Only remove non-target connections when enforce_simple_topology demands it.
+                    if (m_settings.enforce_simple_topology && joinable->m_slave_status.size() > 1)
+                    {
+                        SlaveStatusArray extra_conns;
+                        for (auto& ss : joinable->m_slave_status)
+                        {
+                            if (&ss != match)
+                            {
+                                extra_conns.push_back(ss);
+                            }
+                        }
+                        if (!extra_conns.empty())
+                        {
+                            MXB_NOTICE("Erasing %lu replication connection(s) from server '%s'.",
+                                       extra_conns.size(), name);
+                            joinable->remove_slave_conns(op, extra_conns);
+                        }
+                    }
+
+                    if (match)
+                    {
+                        auto slave_settings = match->settings;
+                        fix_gtid_mode(slave_settings.gtid_mode);
+                        op_success = joinable->redirect_existing_slave_conn(op, slave_settings, m_master);
+                    }
+                    else
+                    {
+                        MXB_NOTICE("No slave connection named '%s' found on '%s', creating new connection.",
+                                   chan.c_str(), name);
+                        SlaveStatus::Settings new_conn(chan, m_master->server, GtidMode::CURRENT);
+                        op_success = joinable->create_start_slave(op, new_conn);
+                    }
+                }
             }
 
             if (op_success)
@@ -822,21 +875,29 @@ bool MariaDBMonitor::server_is_rejoin_suspect(GeneralOpData& op, MariaDBServer* 
         {
             SlaveStatus* slave_status = &rejoin_cand->m_slave_status[0];
 
-            // which is connected to master but it's the wrong one
+            // Connection points to the wrong master.
+            bool wrong_master = false;
             if (slave_status->slave_io_running == SlaveStatus::SLAVE_IO_YES
                 && slave_status->master_server_id != m_master->m_server_id)
             {
-                is_suspect = true;
+                wrong_master = true;
             }
-            // or is disconnected but master host or port is wrong.
             else if (slave_status->slave_io_running == SlaveStatus::SLAVE_IO_CONNECTING
                      && slave_status->slave_sql_running)
             {
                 if (!slave_status->settings.master_endpoint.points_to_server(*m_master->server))
                 {
-                    is_suspect = true;
+                    wrong_master = true;
                 }
             }
+
+            // When rejoin_channel is set, the connection name must also match — checked
+            // independently of IO state so that SLAVE_IO_CONNECTING to the correct endpoint
+            // with the wrong channel name is still caught.
+            bool wrong_channel = !m_settings.rejoin_channel.empty()
+                                 && slave_status->settings.name != m_settings.rejoin_channel;
+
+            is_suspect = wrong_master || wrong_channel;
         }
         else if (m_settings.enforce_simple_topology)
         {

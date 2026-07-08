@@ -41,6 +41,7 @@ const char* const CN_DEMOTION_SQL_FILE = "demotion_sql_file";
 const char* const CN_HANDLE_EVENTS = "handle_events";
 
 static const char CN_AUTO_REJOIN[] = "auto_rejoin";
+static const char CN_REJOIN_CHANNEL[] = "rejoin_channel";
 static const char CN_FAILCOUNT[] = "failcount";
 static const char CN_ENFORCE_READONLY[] = "enforce_read_only_slaves";
 static const char CN_ENFORCE_READONLY_SRVRS[] = "enforce_read_only_servers";
@@ -154,6 +155,12 @@ cfg::ParamBool s_auto_rejoin(
     &s_spec, CN_AUTO_REJOIN,
     "Enable automatic server rejoin",
     false, cfg::Param::AT_RUNTIME);
+
+cfg::ParamString s_rejoin_channel(
+    &s_spec, CN_REJOIN_CHANNEL,
+    "Slave channel name to use when rejoining. Only this channel is redirected or created; "
+    "all other channels are left untouched. Empty string (default) preserves legacy behaviour.",
+    "", cfg::Param::AT_RUNTIME);
 
 cfg::ParamBool s_enforce_read_only_slaves(
     &s_spec, CN_ENFORCE_READONLY,
@@ -460,6 +467,7 @@ MariaDBMonitor::Settings::Settings(const std::string& name, MariaDBMonitor* moni
     add_native(&Settings::shared, &Shared::switchover_timeout, &s_switchover_timeout);
     add_native(&Settings::auto_failover, &s_auto_failover);
     add_native(&Settings::auto_rejoin, &s_auto_rejoin);
+    add_native(&Settings::rejoin_channel, &s_rejoin_channel);
     add_native(&Settings::enforce_read_only_slaves, &s_enforce_read_only_slaves);
     add_native(&Settings::enforce_read_only_servers, &s_enforce_read_only_servers);
     add_native(&Settings::enforce_writable_master, &s_enforce_writable_master);

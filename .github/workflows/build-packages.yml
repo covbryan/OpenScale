@@ -2,6 +2,9 @@ name: Build packages
 
 on:
   workflow_dispatch:            # ad-hoc: build any branch/tag on demand (e.g. dev branches)
+  pull_request:
+    branches:
+      - '24.02'
   push:
     branches:
       - '24.02'                 # rolling "latest" of the series → builds on every release push
@@ -12,10 +15,15 @@ on:
 permissions:
   contents: read          # least privilege; artifacts use the Actions API, not contents
 
+concurrency:
+  group: packages-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     name: ${{ matrix.name }}
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     container:
       image: ${{ matrix.container }}
     strategy:
@@ -31,16 +39,13 @@ jobs:
     env:
       CCACHE_DIR: ${{ github.workspace }}/.ccache
       CCACHE_MAXSIZE: 2G
+      BUILD_JOBS: "2"
     # Container jobs default the run-shell to `sh` (dash on Debian); force bash so
     # bashisms like ${VAR//from/to} work consistently across both legs.
     defaults:
       run:
         shell: bash
     steps:
-      # 0. Slugify the ref (branch/tag) into a filesystem-safe artifact suffix.
-      - name: Compute ref slug
-        run: echo "REF_SLUG=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
-
       # 1. Prereqs BEFORE checkout — git is required so submodules can be fetched.
       - name: Prerequisites (Rocky Linux 9)
         if: matrix.pkg == 'rpm'
@@ -84,28 +89,123 @@ jobs:
       - name: Install build dependencies
         run: bash BUILD/install_build_deps.sh 3.25.1 20
 
-      # 5. Configure + build + package. ccache wired via compiler-launcher flags.
-      - name: Build packages
+      # 5. Configure, build, and run unit tests. A tag cannot produce release artifacts
+      #    unless the same binaries pass the repository's CTest suite.
+      - name: Configure
         run: |
           set -eux
           ccache --zero-stats || true
-          mkdir build && cd build
-          cmake .. \
-            -DPACKAGE=Y \
-            -DCMAKE_INSTALL_PREFIX=/usr \
-            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+          cmake_args=(
+            -DPACKAGE=Y
+            -DBUILD_TESTS=Y
+            -DCMAKE_INSTALL_PREFIX=/usr
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache
             -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-          make -j"$(nproc)" package
-          ccache --show-stats || true
-          ls -la ./*.rpm ./*.deb ./*.sha256 2>/dev/null || true
+          )
 
-      # 6. Upload the package(s) + checksum as a 30-day artifact.
+          # Branch, pull-request, and manual branch builds must sort below the
+          # release package. Tags retain the release number from VERSION*.cmake.
+          if [[ "$GITHUB_REF_TYPE" != tag ]]; then
+            cmake_args+=("-DMAXSCALE_BUILD_NUMBER=0.${GITHUB_RUN_NUMBER}.git${GITHUB_SHA:0:12}")
+          fi
+
+          cmake -S . -B build "${cmake_args[@]}"
+
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build --parallel "$BUILD_JOBS" 2>&1 | tee build/build.log
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-log-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/build.log
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Unit tests
+        run: |
+          ctest --test-dir build \
+            --timeout 120 \
+            --output-on-failure \
+            --output-junit "${GITHUB_WORKSPACE}/build/ctest-results.xml" \
+            --parallel "$(nproc)"
+
+      - name: Upload unit test results
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: unit-tests-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/ctest-results.xml
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Package
+        run: |
+          set -eux
+          cmake --build build --target package --parallel "$BUILD_JOBS"
+          ccache --show-stats || true
+          ls -la build/*.rpm build/*.deb build/*.sha256 2>/dev/null || true
+
+      # 6. Upload the package and checksum as a short-lived validation artifact.
       - name: Upload packages
         uses: actions/upload-artifact@v7
         with:
-          name: openscale-${{ matrix.name }}-${{ env.REF_SLUG }}
+          name: openscale-${{ matrix.name }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
             build/*.${{ matrix.pkg }}
             build/*.${{ matrix.pkg }}.sha256
-          retention-days: 30
+          retention-days: 14
           if-no-files-found: error
+
+  # Publish a GitHub Release with the packages when a version tag (2*.*.*) is pushed.
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write          # needed to create releases / upload assets
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v8      # compatible with upload-artifact@v7 (v4+ backend)
+        with:
+          path: dist                            # -> dist/<artifact>/<files>
+
+      - name: Stage release assets (rebrand maxscale -> openscale)
+        run: |
+          set -eux
+          shopt -s nullglob
+          mkdir -p out
+          # versioned files, renamed openscale-* (bytes unchanged; internal package name is
+          # still 'maxscale' until the code rebrand)
+          for f in dist/*/maxscale-*.x86_64.rpm dist/*/maxscale_*_amd64.deb; do
+            b=$(basename "$f")
+            cp "$f" "out/openscale${b#maxscale}"
+          done
+          # stable "latest" aliases for permanent releases/latest/download/ URLs
+          cp dist/*/maxscale-*.x86_64.rpm  out/openscale-el9-x86_64.rpm
+          cp dist/*/maxscale_*_amd64.deb   out/openscale-bookworm-amd64.deb
+          # fresh checksums covering the openscale-named assets
+          ( cd out && sha256sum ./*.rpm ./*.deb > SHA256SUMS.txt )
+          ls -la out
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -eux
+          # SemVer pre-release tags (contain a hyphen, e.g. 24.02.11-rc.1) publish as GitHub
+          # pre-releases so they never become "latest".
+          PRERELEASE=""
+          case "$TAG" in *-*) PRERELEASE="--prerelease" ;; esac
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" out/* --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            gh release create "$TAG" out/* --repo "$GITHUB_REPOSITORY" \
+              --title "OpenScale $TAG" \
+              --notes "Automated build of OpenScale $TAG - Rocky Linux 9 (RPM) and Debian Bookworm (DEB)." \
+              --verify-tag $PRERELEASE
+          fi

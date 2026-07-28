@@ -1,0 +1,111 @@
+name: Build packages
+
+on:
+  workflow_dispatch:            # ad-hoc: build any branch/tag on demand (e.g. dev branches)
+  push:
+    branches:
+      - '24.02'                 # rolling "latest" of the series → builds on every release push
+      # add future series branches here, e.g. '25.01'
+    tags:
+      - '2*.*.*'                # any version tag (24.02.10, 25.01.0, …) → immutable build
+
+permissions:
+  contents: read          # least privilege; artifacts use the Actions API, not contents
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ matrix.container }}
+    strategy:
+      fail-fast: false     # one distro failing must not cancel the other
+      matrix:
+        include:
+          - name: rockylinux9
+            container: quay.io/rockylinux/rockylinux:9   # canonical, always-maintained
+            pkg: rpm
+          - name: debian-bookworm
+            container: debian:bookworm
+            pkg: deb
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/.ccache
+      CCACHE_MAXSIZE: 2G
+    # Container jobs default the run-shell to `sh` (dash on Debian); force bash so
+    # bashisms like ${VAR//from/to} work consistently across both legs.
+    defaults:
+      run:
+        shell: bash
+    steps:
+      # 0. Slugify the ref (branch/tag) into a filesystem-safe artifact suffix.
+      - name: Compute ref slug
+        run: echo "REF_SLUG=${GITHUB_REF_NAME//\//-}" >> "$GITHUB_ENV"
+
+      # 1. Prereqs BEFORE checkout — git is required so submodules can be fetched.
+      - name: Prerequisites (Rocky Linux 9)
+        if: matrix.pkg == 'rpm'
+        run: |
+          set -eux
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled crb     # CRB repo for build deps
+          dnf install -y epel-release               # ccache lives in EPEL on EL9
+          dnf install -y git tar gzip ccache
+          git config --global --add safe.directory '*'
+
+      - name: Prerequisites (Debian Bookworm)
+        if: matrix.pkg == 'deb'
+        run: |
+          set -eux
+          apt-get update
+          # curl: BUILD/install_npm.sh uses it to resolve the Node.js version; Debian's
+          # base image ships neither curl nor wget, and the deps script only adds wget.
+          apt-get install -y --no-install-recommends \
+            git ca-certificates curl cmake build-essential dpkg-dev ccache tar gzip
+          git config --global --add safe.directory '*'
+
+      # 2. Checkout including the mariadb-connector-c submodule.
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      # 3. ccache restore — scoped per distro + per branch, newest-first fallback.
+      - name: ccache
+        uses: actions/cache@v6
+        with:
+          path: ${{ github.workspace }}/.ccache
+          key: ccache-${{ matrix.name }}-${{ github.ref_name }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-${{ matrix.name }}-${{ github.ref_name }}-
+            ccache-${{ matrix.name }}-
+
+      # 4. Install build deps (script auto-detects apt vs dnf; no sudo; runs as root).
+      #    Pin cmake 3.25.1 / node 20 — the versions the repo's own test-deps script uses.
+      - name: Install build dependencies
+        run: bash BUILD/install_build_deps.sh 3.25.1 20
+
+      # 5. Configure + build + package. ccache wired via compiler-launcher flags.
+      - name: Build packages
+        run: |
+          set -eux
+          ccache --zero-stats || true
+          mkdir build && cd build
+          cmake .. \
+            -DPACKAGE=Y \
+            -DCMAKE_INSTALL_PREFIX=/usr \
+            -DCMAKE_C_COMPILER_LAUNCHER=ccache \
+            -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+          make -j"$(nproc)" package
+          ccache --show-stats || true
+          ls -la ./*.rpm ./*.deb ./*.sha256 2>/dev/null || true
+
+      # 6. Upload the package(s) + checksum as a 30-day artifact.
+      - name: Upload packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: openscale-${{ matrix.name }}-${{ env.REF_SLUG }}
+          path: |
+            build/*.${{ matrix.pkg }}
+            build/*.${{ matrix.pkg }}.sha256
+          retention-days: 30
+          if-no-files-found: error

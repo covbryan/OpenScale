@@ -139,7 +139,7 @@ struct KafkaCommonConfig
     mxs::config::ParamPath           kafka_ssl_cert;
     mxs::config::ParamPath           kafka_ssl_key;
     mxs::config::ParamString         kafka_sasl_user;
-    mxs::config::ParamString         kafka_sasl_password;
+    mxs::config::ParamPassword       kafka_sasl_password;
     mxs::config::ParamEnum<SaslMech> kafka_sasl_mechanism;
 };
 

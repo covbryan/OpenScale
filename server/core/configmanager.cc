@@ -33,6 +33,7 @@
 
 #include <set>
 #include <fstream>
+#include <sys/stat.h>
 #include <mysqld_error.h>
 
 using namespace std::chrono;
@@ -340,8 +341,17 @@ bool ConfigManager::load_cached_config()
     std::string filename = dynamic_config_filename();
     m_cluster = get_cluster();
 
+    bool cache_exists = access(filename.c_str(), F_OK) == 0;
+
+    // Secure an existing cached configuration even if synchronization is no longer enabled.
+    if (cache_exists && chmod(filename.c_str(), S_IRUSR | S_IWUSR) != 0)
+    {
+        MXB_ERROR("Failed to secure cached configuration '%s': %d, %s",
+                  filename.c_str(), errno, mxb_strerror(errno));
+    }
+
     // Check only if the file exists. If it does, try to load it.
-    if (!m_cluster.empty() && access(filename.c_str(), F_OK) == 0)
+    if (!m_cluster.empty() && cache_exists)
     {
         mxb::Json new_json(mxb::Json::Type::UNDEFINED);
 
@@ -542,7 +552,7 @@ mxb::Json ConfigManager::to_json() const
 
 void ConfigManager::save_config(const std::string& payload)
 {
-    if (auto err = mxb::save_file(dynamic_config_filename(), payload); !err.empty())
+    if (auto err = mxb::save_file(dynamic_config_filename(), payload, 0600); !err.empty())
     {
         MXB_WARNING("Failed to save configuration: %s", err.c_str());
     }

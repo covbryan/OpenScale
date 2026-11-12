@@ -268,9 +268,9 @@ const char CS_ADMIN_BASE_PATH_DESC[] =
 cfg::ParamString s_cs_admin_base_path(&s_spec, "cs_admin_base_path", CS_ADMIN_BASE_PATH_DESC, "/cmapi/0.4.0",
                                       cfg::Param::AT_RUNTIME);
 
-cfg::ParamString s_cs_admin_api_key(&s_spec, "cs_admin_api_key",
-                                    "The API key used in communication with the ColumnStore admin daemon.",
-                                    "", cfg::Param::AT_RUNTIME);
+cfg::ParamPassword s_cs_admin_api_key(&s_spec, "cs_admin_api_key",
+                                      "The API key used in communication with the ColumnStore admin daemon.",
+                                      "", cfg::Param::AT_RUNTIME);
 
 cfg::ParamString s_ssh_user(&s_spec, CONFIG_SSH_USER,
                             "SSH username. Used for running remote commands on servers.", "",

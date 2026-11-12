@@ -1948,7 +1948,14 @@ int main(int argc, char** argv)
         // before the path validation done by check_paths() to prevent it from failing.
         // The directory wont' exist if it's the first time MaxScale is starting up
         // with this configuration.
-        mxs_mkdir_all(mxs::config_persistdir(), S_IRWXU | S_IRWXG | S_IROTH | S_IXOTH);
+        if (!mxs_mkdir_all(mxs::config_persistdir(), S_IRWXU)
+            || chmod(mxs::config_persistdir(), S_IRWXU) != 0)
+        {
+            MXB_ERROR("Failed to secure persisted configuration directory '%s': %d, %s",
+                      mxs::config_persistdir(), errno, mxb_strerror(errno));
+            rc = MAXSCALE_INTERNALERROR;
+            return rc;
+        }
 
         // Also create the PID file directory. This will exist if started by SystemD but
         // if run manually from the command line, it won't exist.

@@ -100,7 +100,7 @@ bool admin_dump_users(const Users* users, const char* fname)
 
     std::string path = std::string(mxs::datadir()) + "/" + fname;
     auto str = mxb::Json(users->to_json(), mxb::Json::RefType::STEAL).to_string(mxb::Json::Format::COMPACT);
-    auto err = mxb::save_file(path, str);
+    auto err = mxb::save_file(path, str, 0600);
 
     if (!err.empty())
     {
@@ -270,6 +270,12 @@ bool load_rest_users()
     FILE* fp = fopen(pathc, "r");
     if (fp)
     {
+        if (fchmod(fileno(fp), S_IRUSR | S_IWUSR) != 0)
+        {
+            MXB_ERROR("Failed to secure admin users file '%s': %d, %s",
+                      pathc, errno, mxb_strerror(errno));
+        }
+
         json_error_t err;
         json_t* json = json_loadf(fp, 0, &err);
         if (json)

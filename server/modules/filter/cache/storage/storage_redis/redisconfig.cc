@@ -63,7 +63,7 @@ config::ParamString username(
     "The username to use when authenticating to Redis.",
     "");
 
-config::ParamString password(
+config::ParamPassword password(
     &specification,
     "password",
     "The password to use when authenticating to Redis.",

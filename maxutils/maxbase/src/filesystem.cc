@@ -24,6 +24,11 @@ namespace maxbase
 
 std::string save_file(std::string file, const void* ptr, size_t size)
 {
+    return save_file(std::move(file), ptr, size, 0644);
+}
+
+std::string save_file(std::string file, const void* ptr, size_t size, mode_t mode)
+{
     std::string err;
     std::string tmp = file + "XXXXXX";
     int fd = mkstemp(tmp.data());
@@ -40,7 +45,7 @@ std::string save_file(std::string file, const void* ptr, size_t size)
             err = mxb::string_printf("Write to file '%s' failed: %d, %s",
                                      tmp.c_str(), errno, mxb_strerror(errno));
         }
-        else if (fchmod(fd, 0644) == -1)
+        else if (fchmod(fd, mode) == -1)
         {
             err = mxb::string_printf("Failed to set file permissions for file '%s': %d, %s",
                                      tmp.c_str(), errno, mxb_strerror(errno));

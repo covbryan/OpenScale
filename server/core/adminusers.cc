@@ -22,6 +22,7 @@
 #include <crypt.h>
 #include <sys/stat.h>
 #include <string>
+#include <sstream>
 
 #include <maxbase/alloc.hh>
 #include <maxscale/cn_strings.hh>
@@ -48,7 +49,14 @@ namespace
 {
 Users rest_users;
 
-bool load_rest_users();
+enum class LoadUsersResult
+{
+    LOADED,
+    NOT_FOUND,
+    ERROR
+};
+
+LoadUsersResult load_rest_users();
 
 const char INET_USERS_FILE_NAME[] = "passwd";
 
@@ -70,9 +78,16 @@ void rest_users_init()
     const char INET_DEFAULT_USERNAME[] = "admin";
     const char INET_DEFAULT_PASSWORD[] = "mariadb";
 
-    if (!load_rest_users())
+    rest_users = Users();
+
+    auto result = load_rest_users();
+    if (result == LoadUsersResult::NOT_FOUND)
     {
         admin_add_inet_user(INET_DEFAULT_USERNAME, INET_DEFAULT_PASSWORD, USER_ACCOUNT_ADMIN);
+    }
+    else if (result == LoadUsersResult::ERROR)
+    {
+        MXB_ALERT("Failed to load administrator users; default credentials will not be enabled");
     }
 }
 
@@ -208,21 +223,17 @@ json_t* admin_all_users_to_json(const char* host)
 namespace
 {
 
-bool load_legacy_users(FILE* fp, const std::string& path, Users* output)
+bool load_legacy_users(const std::string& contents, const std::string& path, Users* output)
 {
     Users rval;
     const int LINELEN = 80;
-    char uname[LINELEN];
+    std::istringstream input(contents);
+    std::string line;
     bool error = false;
 
-    while (fgets(uname, LINELEN, fp))
+    while (std::getline(input, line))
     {
-        char* nl = strchr(uname, '\n');
-        if (nl)
-        {
-            *nl = '\0';
-        }
-        else if (!feof(fp))
+        if (line.size() >= LINELEN)
         {
             MXB_ERROR("Line length exceeds %d characters, possibly corrupted 'passwd' file in: %s",
                       LINELEN, path.c_str());
@@ -230,21 +241,16 @@ bool load_legacy_users(FILE* fp, const std::string& path, Users* output)
             break;
         }
 
-        const char* password;
-        char* colon = strchr(uname, ':');
-        if (colon)
+        std::string password;
+        auto colon = line.find(':');
+        if (colon != std::string::npos)
         {
             // Inet case
-            *colon = 0;
-            password = colon + 1;
-        }
-        else
-        {
-            // Linux case.
-            password = "";
+            password = line.substr(colon + 1);
+            line.resize(colon);
         }
 
-        rval.add(uname, password, USER_ACCOUNT_ADMIN);
+        rval.add(line, password, USER_ACCOUNT_ADMIN);
     }
 
     if (!error)
@@ -257,64 +263,78 @@ bool load_legacy_users(FILE* fp, const std::string& path, Users* output)
 /**
  * Load the rest-api users.
  *
- * @return True on success
+ * @return Whether users were loaded, the file was absent, or loading failed
  */
-bool load_rest_users()
+LoadUsersResult load_rest_users()
 {
     const char* fname = INET_USERS_FILE_NAME;
-    Users& output = rest_users;
+    Users users;
 
     const std::string path = mxb::string_printf("%s/%s", mxs::datadir(), fname);
     const char* pathc = path.c_str();
 
-    FILE* fp = fopen(pathc, "r");
-    if (fp)
+    auto file = mxb::load_file_secure(path, 0600);
+    if (file.status == mxb::SecureFileResult::Status::NOT_FOUND)
     {
-        if (fchmod(fileno(fp), S_IRUSR | S_IWUSR) != 0)
-        {
-            MXB_ERROR("Failed to secure admin users file '%s': %d, %s",
-                      pathc, errno, mxb_strerror(errno));
-        }
+        return LoadUsersResult::NOT_FOUND;
+    }
+    else if (file.status == mxb::SecureFileResult::Status::ERROR)
+    {
+        MXB_ERROR("%s", file.error.c_str());
+        return LoadUsersResult::ERROR;
+    }
 
-        json_error_t err;
-        json_t* json = json_loadf(fp, 0, &err);
-        if (json)
+    LoadUsersResult rval = LoadUsersResult::ERROR;
+    json_error_t err;
+    json_t* json = json_loadb(file.contents.data(), file.contents.size(), 0, &err);
+    if (json)
+    {
+        /** New format users */
+        if (json_is_array(json) && users.load_json(json))
         {
-            /** New format users */
-            output.load_json(json);
-            json_decref(json);
+            rval = LoadUsersResult::LOADED;
         }
         else
         {
-            /** Old style users file */
-            if (load_legacy_users(fp, path, &output))
-            {
-                /** Users loaded successfully, back up the original file and
-                 * replace it with the new one */
-                const std::string old_users_bu = path + ".backup";
-                const char* old_users_buc = old_users_bu.c_str();
+            MXB_ERROR("Invalid administrator users in '%s'", pathc);
+        }
+        json_decref(json);
+    }
+    else
+    {
+        /** Old style users file */
+        if (load_legacy_users(file.contents, path, &users))
+        {
+            rval = LoadUsersResult::LOADED;
 
-                if (rename(pathc, old_users_buc) != 0)
-                {
-                    MXB_ERROR("Failed to rename old users file: %d, %s", errno, mxb_strerror(errno));
-                }
-                else if (admin_dump_users(&output, fname))
-                {
-                    MXB_NOTICE("Upgraded users file at '%s' to new format, backup of the old file is stored "
-                               "in '%s'.", pathc, old_users_buc);
-                }
-                else
-                {
-                    MXB_ERROR("Failed to dump new users. Please rename the file '%s' manually to '%s' and "
-                              "restart MaxScale to attempt again.", old_users_buc, pathc);
-                }
+            /** Users loaded successfully, back up the original file and
+             * replace it with the new one */
+            const std::string old_users_bu = path + ".backup";
+            const char* old_users_buc = old_users_bu.c_str();
+
+            if (rename(pathc, old_users_buc) != 0)
+            {
+                MXB_ERROR("Failed to rename old users file: %d, %s", errno, mxb_strerror(errno));
+            }
+            else if (admin_dump_users(&users, fname))
+            {
+                MXB_NOTICE("Upgraded users file at '%s' to new format, backup of the old file is stored "
+                           "in '%s'.", pathc, old_users_buc);
+            }
+            else
+            {
+                MXB_ERROR("Failed to dump new users. Please rename the file '%s' manually to '%s' and "
+                          "restart MaxScale to attempt again.", old_users_buc, pathc);
             }
         }
-
-        fclose(fp);
-        return true;
     }
-    return false;
+
+    if (rval == LoadUsersResult::LOADED)
+    {
+        rest_users = std::move(users);
+    }
+
+    return rval;
 }
 }
 

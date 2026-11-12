@@ -25,6 +25,34 @@
 namespace maxbase
 {
 
+struct SecureFileResult
+{
+    enum class Status
+    {
+        SUCCESS,
+        NOT_FOUND,
+        ERROR
+    };
+
+    Status      status {Status::ERROR};
+    std::string contents;
+    std::string error;
+};
+
+/**
+ * Securely load a file from disk.
+ *
+ * The file is opened without following a leaf symlink, validated as a regular
+ * file owned by the current effective user and group, repaired to the requested
+ * mode through the open descriptor, and read through that same descriptor.
+ *
+ * @param file The path to load
+ * @param mode The exact permissions to apply before reading
+ *
+ * @return The file status, contents on success, and an error on failure
+ */
+SecureFileResult load_file_secure(const std::string& file, mode_t mode);
+
 /**
  * Load a file from disk
  *

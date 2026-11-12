@@ -33,7 +33,6 @@
 
 #include <set>
 #include <fstream>
-#include <sys/stat.h>
 #include <mysqld_error.h>
 
 using namespace std::chrono;
@@ -334,28 +333,30 @@ bool ConfigManager::revert_changes()
     return rval;
 }
 
-bool ConfigManager::load_cached_config()
+ConfigManager::CacheLoad ConfigManager::load_cached_config()
 {
     mxb::LogScope scope(SCOPE_NAME);
-    bool have_config = false;
     std::string filename = dynamic_config_filename();
     m_cluster = get_cluster();
 
-    bool cache_exists = access(filename.c_str(), F_OK) == 0;
-
-    // Secure an existing cached configuration even if synchronization is no longer enabled.
-    if (cache_exists && chmod(filename.c_str(), S_IRUSR | S_IWUSR) != 0)
+    auto file = mxb::load_file_secure(filename, 0600);
+    if (file.status == mxb::SecureFileResult::Status::NOT_FOUND)
     {
-        MXB_ERROR("Failed to secure cached configuration '%s': %d, %s",
-                  filename.c_str(), errno, mxb_strerror(errno));
+        return CacheLoad::STATIC;
+    }
+    else if (file.status == mxb::SecureFileResult::Status::ERROR)
+    {
+        MXB_ERROR("Failed to load cached configuration securely: %s", file.error.c_str());
+        return CacheLoad::ERROR;
     }
 
-    // Check only if the file exists. If it does, try to load it.
-    if (!m_cluster.empty() && cache_exists)
+    if (!m_cluster.empty())
     {
-        mxb::Json new_json(mxb::Json::Type::UNDEFINED);
+        json_error_t error;
+        mxb::Json new_json(json_loadb(file.contents.data(), file.contents.size(), 0, &error),
+                          mxb::Json::RefType::STEAL);
 
-        if (new_json.load(filename))
+        if (new_json)
         {
             std::string cluster_name = new_json.get_string(CN_CLUSTER_NAME);
             int64_t version = new_json.get_int(CN_VERSION);
@@ -366,7 +367,7 @@ bool ConfigManager::load_cached_config()
                            cluster_name.c_str(), version, filename.c_str());
 
                 m_current_config = std::move(new_json);
-                have_config = true;
+                return CacheLoad::CACHED;
             }
             else
             {
@@ -375,9 +376,14 @@ bool ConfigManager::load_cached_config()
                             cluster_name.c_str(), m_cluster.c_str(), filename.c_str());
             }
         }
+        else
+        {
+            MXB_ERROR("Failed to load cached configuration '%s': %s", filename.c_str(), error.text);
+            return CacheLoad::ERROR;
+        }
     }
 
-    return have_config;
+    return CacheLoad::STATIC;
 }
 
 ConfigManager::Startup ConfigManager::process_cached_config()

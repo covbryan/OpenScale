@@ -22,6 +22,7 @@
 #include <execinfo.h>
 #endif
 #include <ftw.h>
+#include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
@@ -247,6 +248,46 @@ bool   is_file_and_readable(const string& absolute_pathname);
 bool   path_is_readable(const string& absolute_pathname);
 
 string resolve_maxscale_conf_fname(const string& cnf_file_arg);
+
+bool secure_directory(const char* path, mode_t mode)
+{
+    int fd = open(path, O_RDONLY | O_DIRECTORY | O_CLOEXEC | O_NOFOLLOW);
+    if (fd == -1)
+    {
+        return false;
+    }
+
+    struct stat directory_info;
+    if (fstat(fd, &directory_info) != 0)
+    {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return false;
+    }
+    else if (!S_ISDIR(directory_info.st_mode))
+    {
+        close(fd);
+        errno = ENOTDIR;
+        return false;
+    }
+    else if (directory_info.st_uid != geteuid() || directory_info.st_gid != getegid())
+    {
+        close(fd);
+        errno = EPERM;
+        return false;
+    }
+    else if (fchmod(fd, mode) != 0)
+    {
+        int error = errno;
+        close(fd);
+        errno = error;
+        return false;
+    }
+
+    close(fd);
+    return true;
+}
 }
 
 #define VA_MESSAGE(message, format) \
@@ -1949,7 +1990,7 @@ int main(int argc, char** argv)
         // The directory wont' exist if it's the first time MaxScale is starting up
         // with this configuration.
         if (!mxs_mkdir_all(mxs::config_persistdir(), S_IRWXU)
-            || chmod(mxs::config_persistdir(), S_IRWXU) != 0)
+            || !secure_directory(mxs::config_persistdir(), S_IRWXU))
         {
             MXB_ERROR("Failed to secure persisted configuration directory '%s': %d, %s",
                       mxs::config_persistdir(), errno, mxb_strerror(errno));
@@ -2107,7 +2148,17 @@ int main(int argc, char** argv)
      * the order of the events would be the way they appear to be.
      */
     auto do_startup = [&]() {
-            bool use_static_cnf = !manager.load_cached_config();
+            auto cache_load = manager.load_cached_config();
+
+            if (cache_load == mxs::ConfigManager::CacheLoad::ERROR)
+            {
+                MXB_ALERT("Cached configuration exists but could not be loaded securely, cannot continue.");
+                rc = MAXSCALE_BADCONFIG;
+                main_worker.start_shutdown();
+                return;
+            }
+
+            bool use_static_cnf = cache_load == mxs::ConfigManager::CacheLoad::STATIC;
 
             if (use_static_cnf || cnf.config_check)
             {

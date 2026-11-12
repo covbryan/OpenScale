@@ -18,6 +18,7 @@
 #include <maxscale/protocol/mariadb/resultset.hh>
 #include <maxscale/json.hh>
 #include <maxscale/secrets.hh>
+#include <maxbase/filesystem.hh>
 
 #include <fstream>
 #include <sys/types.h>
@@ -76,7 +77,12 @@ Pinloki::~Pinloki()
 
 bool Pinloki::post_configure()
 {
-    if (m_master_config.load(m_config))
+    auto result = m_master_config.load(m_config);
+    if (result == MasterConfig::LoadResult::ERROR)
+    {
+        return false;
+    }
+    else if (result == MasterConfig::LoadResult::LOADED)
     {
         if (m_master_config.slave_running)
         {
@@ -623,7 +629,7 @@ mxq::GtidList Pinloki::gtid_io_pos() const
 
 void Pinloki::MasterConfig::save(const Config& config) const
 {
-    auto js = json_pack(
+    mxb::Json js(json_pack(
         "{"
         "s: b,"     // slave_running
         "s: s,"     // host
@@ -655,51 +661,66 @@ void Pinloki::MasterConfig::save(const Config& config) const
         "ssl_crlpath", ssl_crlpath.c_str(),
         "ssl_key", ssl_key.c_str(),
         "ssl_cipher", ssl_cipher.c_str(),
-        "ssl_verify_server_cert", ssl_verify_server_cert);
+        "ssl_verify_server_cert", ssl_verify_server_cert),
+        mxb::Json::RefType::STEAL);
 
     mxb_assert(js);
-    json_dump_file(js, config.master_info_file().c_str(), JSON_COMPACT);
-    json_decref(js);
+    auto json = js.to_string(mxb::Json::Format::COMPACT);
+    if (auto err = mxb::save_file(config.master_info_file(), json, 0600); !err.empty())
+    {
+        MXB_ERROR("Failed to save primary info JSON file: %s", err.c_str());
+    }
 }
 
-bool Pinloki::MasterConfig::load(const Config& config)
+Pinloki::MasterConfig::LoadResult Pinloki::MasterConfig::load(const Config& config)
 {
-    bool rval = false;
-
-    if (access(config.master_info_file().c_str(), F_OK) == 0)
+    auto file = mxb::load_file_secure(config.master_info_file(), 0600);
+    if (file.status == mxb::SecureFileResult::Status::NOT_FOUND)
     {
-        json_error_t err;
-        auto js = json_load_file(config.master_info_file().c_str(), 0, &err);
-
-        if (js)
-        {
-            rval = true;
-
-            mxs::get_json_bool(js, "slave_running", &slave_running);
-            mxs::get_json_string(js, "host", &host);
-            mxs::get_json_int(js, "port", &port);
-            mxs::get_json_string(js, "user", &user);
-            mxs::get_json_string(js, "password", &password);
-            mxs::get_json_bool(js, "use_gtid", &use_gtid);
-            mxs::get_json_bool(js, "ssl", &ssl);
-            mxs::get_json_string(js, "ssl_ca", &ssl_ca);
-            mxs::get_json_string(js, "ssl_capath", &ssl_capath);
-            mxs::get_json_string(js, "ssl_cert", &ssl_cert);
-            mxs::get_json_string(js, "ssl_crl", &ssl_crl);
-            mxs::get_json_string(js, "ssl_crlpath", &ssl_crlpath);
-            mxs::get_json_string(js, "ssl_key", &ssl_key);
-            mxs::get_json_string(js, "ssl_cipher", &ssl_cipher);
-            mxs::get_json_bool(js, "ssl_verify_server_cert", &ssl_verify_server_cert);
-
-            json_decref(js);
-        }
-        else
-        {
-            MXB_INFO("Failed to load primary info JSON file: %s", err.text);
-        }
+        return LoadResult::NOT_FOUND;
+    }
+    else if (file.status == mxb::SecureFileResult::Status::ERROR)
+    {
+        MXB_ERROR("Failed to securely load primary info JSON file: %s", file.error.c_str());
+        return LoadResult::ERROR;
     }
 
-    return rval;
+    json_error_t err;
+    auto js = json_loadb(file.contents.data(), file.contents.size(), 0, &err);
+    if (!js)
+    {
+        MXB_ERROR("Failed to load primary info JSON file: %s", err.text);
+        return LoadResult::ERROR;
+    }
+
+    MasterConfig loaded;
+    bool valid = json_is_object(js)
+        && mxs::get_json_bool(js, "slave_running", &loaded.slave_running)
+        && mxs::get_json_string(js, "host", &loaded.host)
+        && mxs::get_json_int(js, "port", &loaded.port)
+        && mxs::get_json_string(js, "user", &loaded.user)
+        && mxs::get_json_string(js, "password", &loaded.password)
+        && mxs::get_json_bool(js, "use_gtid", &loaded.use_gtid)
+        && mxs::get_json_bool(js, "ssl", &loaded.ssl)
+        && mxs::get_json_string(js, "ssl_ca", &loaded.ssl_ca)
+        && mxs::get_json_string(js, "ssl_capath", &loaded.ssl_capath)
+        && mxs::get_json_string(js, "ssl_cert", &loaded.ssl_cert)
+        && mxs::get_json_string(js, "ssl_crl", &loaded.ssl_crl)
+        && mxs::get_json_string(js, "ssl_crlpath", &loaded.ssl_crlpath)
+        && mxs::get_json_string(js, "ssl_key", &loaded.ssl_key)
+        && mxs::get_json_string(js, "ssl_cipher", &loaded.ssl_cipher)
+        && mxs::get_json_bool(js, "ssl_verify_server_cert", &loaded.ssl_verify_server_cert);
+
+    json_decref(js);
+
+    if (!valid)
+    {
+        MXB_ERROR("Primary info JSON file contains invalid state");
+        return LoadResult::ERROR;
+    }
+
+    *this = std::move(loaded);
+    return LoadResult::LOADED;
 }
 }
 

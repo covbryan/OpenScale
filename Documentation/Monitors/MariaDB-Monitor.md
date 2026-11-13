@@ -568,6 +568,19 @@ later.
 Failover is considered successful if steps 1 to 3 succeed, as the cluster then
 has at least a valid primary server.
 
+#### Failover-safe
+
+```
+call command mariadbmon failover-safe MONITOR
+```
+
+**Failover-safe** performs the same steps as normal failover but refuses to
+promote a replica when its relay log is known to be missing transactions that
+the primary had before going down. The comparison uses the primary's last known
+`gtid_binlog_pos`, so it cannot detect transactions written after the most
+recent monitor update. Safe failover therefore prevents known transaction loss
+but cannot guarantee that no transaction is lost.
+
 #### Switchover
 
 ```
@@ -680,6 +693,7 @@ are unequal, an error is given.
 Example commands are below:
 ```
 maxctrl call command mariadbmon failover MyMonitor
+maxctrl call command mariadbmon failover-safe MyMonitor
 maxctrl call command mariadbmon rejoin MyMonitor OldPrimaryServ
 maxctrl call command mariadbmon reset-replication MyMonitor
 maxctrl call command mariadbmon reset-replication MyMonitor NewPrimaryServ
@@ -704,7 +718,7 @@ form:
 ```
 /v1/maxscale/modules/mariadbmon/<operation>?<monitor-name>&<server-name1>&<server-name2>
 ```
-- `<operation>` is the name of the command e.g. _failover_, _switchover_,
+- `<operation>` is the name of the command e.g. _failover_, _failover-safe_, _switchover_,
   _rejoin_ or _reset-replication_.
 - `<monitor-name>` is the monitor name from the MaxScale configuration file.
 - `<server-name1>` and `<server-name2>` are server names as described
@@ -728,16 +742,18 @@ path for making `server4` the new primary would be:
 Example REST-API paths for other commands are listed below.
 ```
 /v1/maxscale/modules/mariadbmon/failover?Cluster1
+/v1/maxscale/modules/mariadbmon/failover-safe?Cluster1
 /v1/maxscale/modules/mariadbmon/rejoin?Cluster1&server3
 /v1/maxscale/modules/mariadbmon/reset-replication?Cluster1&server3
 ```
 
-#### Queued switchover
+#### Queued cluster operations
 
 Most cluster modification commands wait until the operation either succeeds or
-fails. _async-switchover_ is an exception, as it returns immediately. Otherwise
-_async-switchover_ works identical to a normal _switchover_ command. Use the
-module command _fetch-cmd-result_ to view the result of the queued command.
+fails. The _async-failover_, _async-failover-safe_ and _async-switchover_
+variants return immediately. Otherwise, they work identically to their
+synchronous commands. Use the module command _fetch-cmd-result_ to view the
+result of the queued command.
 _fetch-cmd-result_ returns the status or result of the latest manual command,
 whether queued or not.
 ```
@@ -754,7 +770,7 @@ maxctrl call command mariadbmon fetch-cmd-result Cluster1
 
 ### Automatic activation
 
-Failover can activate automatically if `auto_failover` is on. The activation
+Failover can activate automatically if `auto_failover` is on or set to `safe`. The activation
 begins when the primary has been down at least `failcount` monitor iterations.
 Before modifying the cluster, the monitor checks that all prerequisites for the
 failover are fulfilled. If the cluster does not seem ready, an error is printed
@@ -882,12 +898,27 @@ primary.
 
 #### `auto_failover`
 
-- **Type**: [boolean](../Getting-Started/Configuration-Guide.md#booleans)
+- **Type**: [enumeration](../Getting-Started/Configuration-Guide.md#enumerations)
+- **Values**: `true`, `on`, `yes`, `1`, `false`, `off`, `no`, `0`, `safe`
 - **Mandatory**: No
 - **Dynamic**: Yes
 - **Default**: `false`
 
-Enable automatic primary failover. When automatic failover is enabled, MaxScale
+Enable automatic primary failover. The boolean true values enable normal
+failover, the boolean false values disable failover, and `safe` enables safe
+failover. Safe failover refuses to promote a replica when transaction loss is
+detected by comparing its relay-log GTID position with the primary's last known
+binary-log GTID position. This comparison cannot detect transactions written
+after the latest monitor update.
+
+`enforce_simple_topology=true` enables normal automatic failover when
+`auto_failover` is disabled. To retain the additional transaction-loss check,
+set `auto_failover=safe` explicitly. `enforce_simple_topology` also permits
+failover when the primary has never been observed running and its binary-log
+GTID position is unknown. In that situation the safe comparison cannot establish
+whether the replicas received every primary transaction.
+
+When automatic failover is enabled, MaxScale
 will elect a new primary server for the cluster if the old primary goes down. A
 server is assumed *Down* if it cannot be connected to, even if this is caused by
 incorrect credentials. Failover triggers if the primary stays down for
@@ -970,13 +1001,20 @@ This setting tells the monitor to assume that the servers should be arranged in 
 1-primary-N-replicas topology and the monitor should try to keep it that way. If
 `enforce_simple_topology` is enabled, the settings `assume_unique_hostnames`,
 `auto_failover` and `auto_rejoin` are also activated regardless of their individual
-settings.
+settings. If `auto_failover` is disabled, it is enabled in normal mode rather
+than safe mode.
 
 By default, mariadbmon will not rejoin servers with more than one replication
 stream configured into the cluster. Starting with MaxScale 6.2.0, when
 `enforce_simple_topology` is enabled, all servers will be rejoined into the
 cluster and any extra replication sources will be removed. This is done to make
 automated failover with multi-source external replication possible.
+
+The `rejoin_channel` setting does not require `enforce_simple_topology`. Without
+`enforce_simple_topology`, only the configured rejoin channel is redirected or
+created and other replication channels are retained. With
+`enforce_simple_topology` enabled, the other channels are removed to restore a
+simple 1-primary-N-replicas topology.
 
 This setting also allows the monitor to perform a failover to a cluster where the primary
 server has not been seen [Running]. This is usually the case when the primary goes down

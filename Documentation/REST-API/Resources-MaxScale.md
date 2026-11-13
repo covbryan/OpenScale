@@ -2907,12 +2907,23 @@ one to see the parameters of a module before the object is created.
                         "type": "bool"
                     },
                     {
-                        "default_value": false,
-                        "description": "Enable automatic server failover",
+                        "default_value": "false",
+                        "description": "Enable automatic primary server failover",
+                        "enum_values": [
+                            "false",
+                            "off",
+                            "no",
+                            "0",
+                            "safe",
+                            "true",
+                            "on",
+                            "yes",
+                            "1"
+                        ],
                         "mandatory": false,
                         "modifiable": true,
                         "name": "auto_failover",
-                        "type": "bool"
+                        "type": "enum"
                     },
                     {
                         "default_value": false,

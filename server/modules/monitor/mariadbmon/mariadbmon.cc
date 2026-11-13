@@ -102,10 +102,20 @@ cfg::ParamCount s_failcount(
     "Number of failures to tolerate before failover occurs",
     5, cfg::Param::AT_RUNTIME);
 
-cfg::ParamBool s_auto_failover(
+cfg::ParamEnum<MariaDBMonitor::AutoFailover> s_auto_failover(
     &s_spec, CN_AUTO_FAILOVER,
-    "Enable automatic server failover",
-    false, cfg::Param::AT_RUNTIME);
+    "Enable automatic primary server failover",
+    {
+        {MariaDBMonitor::AutoFailover::NONE, "false"},
+        {MariaDBMonitor::AutoFailover::NONE, "off"},
+        {MariaDBMonitor::AutoFailover::NONE, "no"},
+        {MariaDBMonitor::AutoFailover::NONE, "0"},
+        {MariaDBMonitor::AutoFailover::SAFE, "safe"},
+        {MariaDBMonitor::AutoFailover::ALLOW_TRX_LOSS, "true"},
+        {MariaDBMonitor::AutoFailover::ALLOW_TRX_LOSS, "on"},
+        {MariaDBMonitor::AutoFailover::ALLOW_TRX_LOSS, "yes"},
+        {MariaDBMonitor::AutoFailover::ALLOW_TRX_LOSS, "1"},
+    }, MariaDBMonitor::AutoFailover::NONE, cfg::Param::AT_RUNTIME);
 
 cfg::ParamSeconds s_failover_timeout(
     &s_spec, CN_FAILOVER_TIMEOUT,
@@ -319,7 +329,7 @@ bool Spec::do_post_validate(Params& params) const
     if (!s_assume_unique_hostnames.get(params))
     {
         const char PARAM_REQUIRES[] = "'%s' requires that '%s' is enabled.";
-        if (s_auto_failover.get(params))
+        if (s_auto_failover.get(params) != MariaDBMonitor::AutoFailover::NONE)
         {
             MXB_ERROR(PARAM_REQUIRES, s_auto_failover.name().c_str(),
                       s_assume_unique_hostnames.name().c_str());
@@ -523,8 +533,14 @@ bool MariaDBMonitor::Settings::post_configure(const std::map<std::string,
         };
 
         warn_and_enable(&assume_unique_hostnames, CN_ASSUME_UNIQUE_HOSTNAMES);
-        warn_and_enable(&auto_failover, CN_AUTO_FAILOVER);
         warn_and_enable(&auto_rejoin, CN_AUTO_REJOIN);
+
+        if (auto_failover == AutoFailover::NONE)
+        {
+            auto_failover = AutoFailover::ALLOW_TRX_LOSS;
+            const char setting_activated[] = "%s enables %s, overriding any existing setting or default.";
+            MXB_WARNING(setting_activated, CN_ENFORCE_SIMPLE_TOPOLOGY, CN_AUTO_FAILOVER);
+        }
     }
 
     shared.auto_op_configured = m_monitor->cluster_ops_configured();
@@ -778,7 +794,8 @@ void MariaDBMonitor::tick()
     {
         m_cluster_topology_changed = false;
         // If cluster operations are enabled, check topology support and disable if needed.
-        if (m_settings.auto_failover || m_settings.switchover_on_low_disk_space || m_settings.auto_rejoin)
+        if (m_settings.auto_failover != AutoFailover::NONE
+            || m_settings.switchover_on_low_disk_space || m_settings.auto_rejoin)
         {
             check_cluster_operations_support();
         }
@@ -793,7 +810,7 @@ void MariaDBMonitor::tick()
         // Update cluster-wide values dependant on the current master.
         update_gtid_domain();
 
-        if (m_settings.auto_failover)
+        if (m_settings.auto_failover != AutoFailover::NONE)
         {
             m_master->check_semisync_master_status();
         }
@@ -912,7 +929,7 @@ void MariaDBMonitor::process_state_changes()
     // stable.
     if (!m_running_op && can_perform_cluster_ops())
     {
-        if (m_settings.auto_failover)
+        if (m_settings.auto_failover != AutoFailover::NONE)
         {
             handle_auto_failover();
         }
@@ -1260,7 +1277,7 @@ bool MariaDBMonitor::ClusterLocksInfo::time_to_update() const
 
 bool MariaDBMonitor::cluster_ops_configured() const
 {
-    return m_settings.auto_failover || m_settings.auto_rejoin
+    return m_settings.auto_failover != AutoFailover::NONE || m_settings.auto_rejoin
            || m_settings.enforce_read_only_slaves || m_settings.enforce_read_only_servers
            || m_settings.enforce_writable_master || m_settings.switchover_on_low_disk_space;
 }

@@ -242,6 +242,16 @@ public:
     uint64_t relay_log_events(const SlaveStatus& slave_conn) const;
 
     /**
+     * Check whether a relay log is known to be missing events written by the primary.
+     *
+     * @param relay_log_pos Relay log GTID position of a promotion candidate
+     * @param target_binlog_pos Last known binary log GTID position of the primary
+     * @return True if the primary position contains events absent from the relay log
+     */
+    static bool relay_log_missing_events(const GtidList& relay_log_pos,
+                                         const GtidList& target_binlog_pos);
+
+    /**
      * execute_cmd_ex with query retry ON.
      */
     bool execute_cmd(const std::string& cmd, std::string* errmsg_out = nullptr);

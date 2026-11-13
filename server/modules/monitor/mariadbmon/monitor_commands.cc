@@ -39,6 +39,7 @@ enum class ExecMode
 
 const char err_passive_mode[] = "%s requested but not performed, as MaxScale is in passive mode.";
 const char failover_cmd[] = "failover";
+const char safe_failover_cmd[] = "failover-safe";
 const char switchover_cmd[] = "switchover";
 const char rejoin_cmd[] = "rejoin";
 const char reset_repl_cmd[] = "reset-replication";
@@ -59,7 +60,8 @@ const char link_test_msg[] = "Test message";
 const int socat_timeout_s = 5;      // TODO: configurable?
 
 bool manual_switchover(ExecMode mode, SwitchoverType type, const MODULECMD_ARG* args, json_t** error_out);
-bool manual_failover(ExecMode mode, const MODULECMD_ARG* args, json_t** output);
+bool manual_failover(ExecMode mode, MariaDBMonitor::FailoverType type,
+                     const MODULECMD_ARG* args, json_t** output);
 bool manual_rejoin(ExecMode mode, const MODULECMD_ARG* args, json_t** output);
 bool manual_reset_replication(ExecMode mode, const MODULECMD_ARG* args, json_t** output);
 bool release_locks(ExecMode mode, const MODULECMD_ARG* args, json_t** output);
@@ -101,13 +103,27 @@ bool handle_async_switchover(const MODULECMD_ARG* args, json_t** error_out)
 // failover
 bool handle_manual_failover(const MODULECMD_ARG* args, json_t** error_out)
 {
-    return manual_failover(ExecMode::SYNC, args, error_out);
+    return manual_failover(ExecMode::SYNC, MariaDBMonitor::FailoverType::ALLOW_TRX_LOSS,
+                           args, error_out);
 }
 
 // async-failover
 bool handle_async_failover(const MODULECMD_ARG* args, json_t** error_out)
 {
-    return manual_failover(ExecMode::ASYNC, args, error_out);
+    return manual_failover(ExecMode::ASYNC, MariaDBMonitor::FailoverType::ALLOW_TRX_LOSS,
+                           args, error_out);
+}
+
+// failover-safe
+bool handle_manual_failover_safe(const MODULECMD_ARG* args, json_t** error_out)
+{
+    return manual_failover(ExecMode::SYNC, MariaDBMonitor::FailoverType::SAFE, args, error_out);
+}
+
+// async-failover-safe
+bool handle_async_failover_safe(const MODULECMD_ARG* args, json_t** error_out)
+{
+    return manual_failover(ExecMode::ASYNC, MariaDBMonitor::FailoverType::SAFE, args, error_out);
 }
 
 // rejoin
@@ -339,7 +355,8 @@ bool manual_switchover(ExecMode mode, SwitchoverType type, const MODULECMD_ARG* 
  * @param output Json error output
  * @return True on success
  */
-bool manual_failover(ExecMode mode, const MODULECMD_ARG* args, json_t** output)
+bool manual_failover(ExecMode mode, MariaDBMonitor::FailoverType type,
+                     const MODULECMD_ARG* args, json_t** output)
 {
     mxb_assert(args->argc == 1);
     mxb_assert(MODULECMD_GET_TYPE(&args->argv[0].type) == MODULECMD_ARG_MONITOR);
@@ -357,11 +374,11 @@ bool manual_failover(ExecMode mode, const MODULECMD_ARG* args, json_t** output)
         switch (mode)
         {
         case ExecMode::SYNC:
-            rv = handle->run_manual_failover(output);
+            rv = handle->run_manual_failover(type, output);
             break;
 
         case ExecMode::ASYNC:
-            rv = handle->schedule_async_failover(output);
+            rv = handle->schedule_async_failover(type, output);
             break;
         }
     }
@@ -554,6 +571,15 @@ void register_monitor_commands()
                                handle_async_failover, MXS_ARRAY_NELEMS(failover_argv), failover_argv,
                                "Schedule primary failover. Does not wait for completion.");
 
+    modulecmd_register_command(MXB_MODULE_NAME, safe_failover_cmd, MODULECMD_TYPE_ACTIVE,
+                               handle_manual_failover_safe, MXS_ARRAY_NELEMS(failover_argv), failover_argv,
+                               "Perform primary failover if no transaction loss is detected");
+
+    modulecmd_register_command(MXB_MODULE_NAME, "async-failover-safe", MODULECMD_TYPE_ACTIVE,
+                               handle_async_failover_safe, MXS_ARRAY_NELEMS(failover_argv), failover_argv,
+                               "Schedule primary failover if no transaction loss is detected. "
+                               "Does not wait for completion.");
+
     static modulecmd_arg_type_t rejoin_argv[] =
     {
         {MODULECMD_ARG_MONITOR | MODULECMD_ARG_NAME_MATCHES_DOMAIN, ARG_MONITOR_DESC},
@@ -730,20 +756,22 @@ bool MariaDBMonitor::schedule_async_switchover(SERVER* new_master, SERVER* curre
     return schedule_manual_command(func, switchover_cmd, error_out);
 }
 
-bool MariaDBMonitor::run_manual_failover(json_t** error_out)
+bool MariaDBMonitor::run_manual_failover(FailoverType type, json_t** error_out)
 {
-    auto func = [this](){
-        return manual_failover();
+    auto func = [this, type](){
+        return manual_failover(type);
     };
-    return execute_manual_command(func, failover_cmd, error_out);
+    const char* command = type == FailoverType::SAFE ? safe_failover_cmd : failover_cmd;
+    return execute_manual_command(func, command, error_out);
 }
 
-bool MariaDBMonitor::schedule_async_failover(json_t** error_out)
+bool MariaDBMonitor::schedule_async_failover(FailoverType type, json_t** error_out)
 {
-    auto func = [this](){
-        return manual_failover();
+    auto func = [this, type](){
+        return manual_failover(type);
     };
-    return schedule_manual_command(func, failover_cmd, error_out);
+    const char* command = type == FailoverType::SAFE ? safe_failover_cmd : failover_cmd;
+    return schedule_manual_command(func, command, error_out);
 }
 
 bool MariaDBMonitor::run_manual_rejoin(SERVER* rejoin_server, json_t** error_out)

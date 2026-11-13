@@ -19,68 +19,87 @@
 #if defined (NDEBUG)
 #undef NDEBUG
 #endif
-#include <stdio.h>
-#include <stdlib.h>
+
+#include <cstdio>
+#include <cstdlib>
+#include <filesystem>
+#include <sys/stat.h>
 #include <unistd.h>
+
+#include <maxbase/log.hh>
 #include <maxscale/paths.hh>
-#include <maxscale/utils.hh>
 #include <maxscale/users.hh>
 #include "../internal/adminusers.hh"
 
-using mxs::USER_ACCOUNT_ADMIN;
+using mxs::USER_ACCOUNT_UNKNOWN;
 
-/**
- * test1    default user
- *
- * Test that the username password admin/mariadb is accepted if no users
- * have been created and that no other users are accepted
- *
- * WARNING: The passwd file must be removed before this test is run
- */
-static int test1()
+namespace
 {
-    if (admin_verify_inet_user("admin", "mariadb") == 0)
+int expect(bool condition, const char* message)
+{
+    if (!condition)
     {
-        fprintf(stderr, "admin_verify: test 1.1 (default user) failed.\n");
+        fprintf(stderr, "%s\n", message);
         return 1;
     }
-    if (admin_verify_inet_user("bad", "user"))
-    {
-        fprintf(stderr, "admin_verify: test 1.2 (wrong user) failed.\n");
-        return 1;
-    }
-
     return 0;
+}
+
+bool default_login_works()
+{
+    return admin_verify_inet_user("admin", "mariadb") != USER_ACCOUNT_UNKNOWN;
+}
 }
 
 int main(int argc, char** argv)
 {
     mxs::Config::init(argc, argv);
+
+    if (!mxb_log_init(MXB_LOG_TARGET_STDERR))
+    {
+        fprintf(stderr, "Failed to initialize logging\n");
+        return 1;
+    }
+
+    char test_dir[] = "/tmp/openscale-adminusers-XXXXXX";
+    if (!mkdtemp(test_dir))
+    {
+        perror("mkdtemp");
+        return 1;
+    }
+
+    mxs::set_datadir(test_dir);
+    std::string passwd = std::string(test_dir) + "/passwd";
+    std::string target = std::string(test_dir) + "/passwd-target";
     int result = 0;
-    char* home, buf[1024];
 
-    /** Set datadir to /tmp */
-    mxs::set_datadir("/tmp");
-
-    /* Unlink any existing password files before running this test */
-    sprintf(buf, "%s/maxadmin-users", mxs::datadir());
-    if (!is_valid_posix_path(buf))
-    {
-        exit(1);
-    }
-
-    unlink(buf);
-
-    sprintf(buf, "%s/passwd", mxs::datadir());
-    if (!is_valid_posix_path(buf))
-    {
-        exit(1);
-    }
-
-    unlink(buf);
-
+    // A genuinely missing password file enables and persists the initial default.
     rest_users_init();
-    result += test1();
+    result += expect(default_login_works(), "Default administrator was not created for missing state");
 
-    exit(result);
+    struct stat info;
+    result += expect(stat(passwd.c_str(), &info) == 0 && (info.st_mode & 0777) == 0600,
+                     "Administrator password file was not created with mode 0600");
+
+    // Existing weak permissions are repaired while loading the same file descriptor.
+    chmod(passwd.c_str(), 0644);
+    rest_users_init();
+    result += expect(default_login_works(), "Valid administrator state failed to load");
+    result += expect(stat(passwd.c_str(), &info) == 0 && (info.st_mode & 0777) == 0600,
+                     "Weak administrator password-file permissions were not repaired");
+
+    // An unsafe existing path must never be treated as missing default state.
+    rename(passwd.c_str(), target.c_str());
+    symlink(target.c_str(), passwd.c_str());
+    rest_users_init();
+    result += expect(!default_login_works(), "Symlinked administrator state enabled default credentials");
+
+    unlink(passwd.c_str());
+    mkdir(passwd.c_str(), 0700);
+    rest_users_init();
+    result += expect(!default_login_works(), "Non-file administrator state enabled default credentials");
+
+    std::filesystem::remove_all(test_dir);
+    mxb_log_finish();
+    return result;
 }

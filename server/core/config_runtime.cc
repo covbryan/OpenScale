@@ -2537,7 +2537,7 @@ bool runtime_save_config(const char* name, const std::string& config)
     std::string filename = mxs::config_persistdir() + "/"s + name + ".cnf";
     bool new_file = access(filename.c_str(), F_OK) != 0 && errno == ENOENT;
 
-    if (auto err = mxb::save_file(filename, config); !err.empty())
+    if (auto err = mxb::save_file(filename, config, 0600); !err.empty())
     {
         MXB_ERROR("Failed to save config: %s", err.c_str());
     }

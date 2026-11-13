@@ -35,6 +35,13 @@ public:
         RESTART,    // Cached configuration was discarded, restart with static config
     };
 
+    enum class CacheLoad
+    {
+        STATIC,     // No applicable cached configuration, use the static configuration
+        CACHED,     // A valid cached configuration was loaded
+        ERROR,      // Cached state exists but could not be loaded securely
+    };
+
     // The primary key must be under 3072 bytes which for the utf8_mb4 character set is 768 characters. Having
     // the limit as 256 characters should be enough for almost all cases as that's the maximum length of a
     // hostname which some people seem to use for the object names.
@@ -82,9 +89,10 @@ public:
     /**
      * Check if a cached configuration is available and load it if it is
      *
-     * @return True if a cached configuration was loaded
+     * @return CACHED if a cached configuration was loaded, STATIC if static configuration should be used,
+     *         or ERROR if cached state exists but cannot be loaded securely.
      */
-    bool load_cached_config();
+    CacheLoad load_cached_config();
 
 
     /**

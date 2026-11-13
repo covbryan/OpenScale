@@ -3814,6 +3814,11 @@ bool ParamEnum<T>::from_json(const json_t* pJson, value_type* pValue,
 
         rv = from_string(z, pValue, pMessage);
     }
+    else if (json_is_boolean(pJson))
+    {
+        // Some enumerations retain true/false aliases after expanding a former boolean parameter.
+        rv = from_string(json_is_true(pJson) ? "true" : "false", pValue, pMessage);
+    }
     else if (pMessage)
     {
         *pMessage = "Expected a json string, but got a json ";

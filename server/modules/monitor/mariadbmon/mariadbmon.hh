@@ -61,6 +61,19 @@ public:
         LOCKS_MAJORITY_ALL
     };
 
+    enum class AutoFailover
+    {
+        NONE,               /**< Automatic failover is disabled. */
+        SAFE,               /**< Fail over only if no transaction loss is detected. */
+        ALLOW_TRX_LOSS      /**< Fail over even if transaction loss is detected. */
+    };
+
+    enum class FailoverType
+    {
+        SAFE,
+        ALLOW_TRX_LOSS
+    };
+
     /**
      * Create the monitor instance and return the instance data.
      *
@@ -110,7 +123,7 @@ public:
      * @param error_out Json error output
      * @return True if failover was performed
      */
-    bool run_manual_failover(json_t** error_out);
+    bool run_manual_failover(FailoverType type, json_t** error_out);
 
     /**
      * Perform user-activated failover. Does not wait for results, which should be fetched separately.
@@ -118,7 +131,7 @@ public:
      * @param error_out Json error output
      * @return True if failover was scheduled
      */
-    bool schedule_async_failover(json_t** error_out);
+    bool schedule_async_failover(FailoverType type, json_t** error_out);
 
     /**
      * Perform user-activated rejoin
@@ -318,9 +331,10 @@ private:
         ServerOperation            promotion;   // Required by MariaDBServer->promote()
         const MariaDBServer* const demotion_target;
         GeneralOpData              general;
+        OperationType              type;
 
         FailoverParams(ServerOperation promotion, const MariaDBServer* demotion_target,
-                       const GeneralOpData& general);
+                       const GeneralOpData& general, OperationType type);
     };
 
     // Information about a multimaster group (replication cycle)
@@ -430,7 +444,7 @@ private:
 
         // Cluster operations activation settings
 
-        bool auto_failover;                 /* Automatic master failover enabled? */
+        AutoFailover auto_failover;         /* Automatic master failover mode */
         bool auto_rejoin;                   /* Automatic rejoin enabled? */
         std::string rejoin_channel;         /* Slave channel name to use during rejoin. Empty = default. */
         bool switchover_on_low_disk_space;  /* Automatically switch over a master low on disk space */
@@ -544,7 +558,7 @@ private:
 
     // Cluster operation launchers
     mon_op::Result manual_switchover(SwitchoverType type, SERVER* new_master, SERVER* current_master);
-    mon_op::Result manual_failover();
+    mon_op::Result manual_failover(FailoverType type);
     mon_op::Result manual_rejoin(SERVER* rejoin_cand_srv);
     mon_op::Result manual_reset_replication(SERVER* master_server);
     mon_op::Result manual_release_locks();
@@ -577,7 +591,8 @@ private:
     std::unique_ptr<SwitchoverParams>
     switchover_prepare(SwitchoverType type, SERVER* new_master, SERVER* current_master,
                        Log log_mode, OpStart start, mxb::Json& error_out);
-    std::unique_ptr<FailoverParams> failover_prepare(Log log_mode, OpStart start, mxb::Json& error_out);
+    std::unique_ptr<FailoverParams> failover_prepare(FailoverType type, Log log_mode, OpStart start,
+                                                     mxb::Json& error_out);
 
     bool switchover_perform(SwitchoverParams& operation);
     bool failover_perform(FailoverParams& op);

@@ -111,7 +111,7 @@ mon_op::Result MariaDBMonitor::manual_switchover(SwitchoverType type, SERVER* ne
     return rval;
 }
 
-mon_op::Result MariaDBMonitor::manual_failover()
+mon_op::Result MariaDBMonitor::manual_failover(FailoverType type)
 {
     // Manual commands should only run in the main monitor thread.
     mxb_assert(mxb::Worker::get_current()->id() == m_worker->id());
@@ -126,7 +126,7 @@ mon_op::Result MariaDBMonitor::manual_failover()
     }
 
     bool failover_done = false;
-    auto op = failover_prepare(Log::ON, OpStart::MANUAL, output);
+    auto op = failover_prepare(type, Log::ON, OpStart::MANUAL, output);
     if (op)
     {
         failover_done = failover_perform(*op);
@@ -510,7 +510,7 @@ int MariaDBMonitor::redirect_slaves_ex(GeneralOpData& general, OperationType typ
                                        ServerArray* redirected_to_promo, ServerArray* redirected_to_demo)
 {
     const bool is_switchover = (type == OperationType::SWITCHOVER || type == OperationType::SWITCHOVER_FORCE);
-    mxb_assert(is_switchover || type == OperationType::FAILOVER);
+    mxb_assert(is_switchover || type == OperationType::FAILOVER || type == OperationType::FAILOVER_SAFE);
 
     // Slaves of demotion target are redirected to promotion target.
     // Try to redirect even disconnected slaves.
@@ -670,9 +670,9 @@ uint32_t MariaDBMonitor::do_rejoin(GeneralOpData& op, const ServerArray& joinabl
                 if (joinable->demote(op, demotion, OperationType::REJOIN))
                 {
                     MXB_NOTICE("Directing standalone server '%s' to replicate from '%s'.", name, master_name);
-                    // A slave connection description is required. As this is the only connection, no name
-                    // is required.
-                    SlaveStatus::Settings new_conn("", master_server, GtidMode::CURRENT);
+                    // Empty rejoin_channel retains the legacy unnamed connection.
+                    SlaveStatus::Settings new_conn(m_settings.rejoin_channel, master_server,
+                                                   GtidMode::CURRENT);
                     op_success = joinable->create_start_slave(op, new_conn);
                 }
                 else
@@ -1068,7 +1068,7 @@ bool MariaDBMonitor::failover_perform(FailoverParams& op)
     mxb_assert(op.promotion.target && op.demotion_target);
     maybe_set_wait_timeout_all_servers(m_settings.failover_timeout);
 
-    const OperationType type = OperationType::FAILOVER;
+    const OperationType type = op.type;
     MariaDBServer* const promotion_target = op.promotion.target;
     auto const demotion_target = op.demotion_target;
 
@@ -1506,7 +1506,7 @@ bool MariaDBMonitor::is_candidate_better(const MariaDBServer* candidate, const M
  * @return Operation object if cluster is suitable and failover may proceed, or NULL on error
  */
 unique_ptr<MariaDBMonitor::FailoverParams>
-MariaDBMonitor::failover_prepare(Log log_mode, OpStart start, mxb::Json& error_out)
+MariaDBMonitor::failover_prepare(FailoverType type, Log log_mode, OpStart start, mxb::Json& error_out)
 {
     // This function resembles 'switchover_prepare', but does not yet support manual selection.
 
@@ -1537,8 +1537,10 @@ MariaDBMonitor::failover_prepare(Log log_mode, OpStart start, mxb::Json& error_o
     if (demotion_target)
     {
         // Autoselect best server for promotion.
-        MariaDBServer* promotion_candidate = select_promotion_target(demotion_target, OperationType::FAILOVER,
-                                                                     log_mode, &gtid_domain_id, error_out);
+        auto operation = type == FailoverType::SAFE ? OperationType::FAILOVER_SAFE :
+            OperationType::FAILOVER;
+        MariaDBServer* promotion_candidate = select_promotion_target(demotion_target, operation, log_mode,
+                                                                     &gtid_domain_id, error_out);
         if (promotion_candidate)
         {
             promotion_target = promotion_candidate;
@@ -1606,7 +1608,9 @@ MariaDBMonitor::failover_prepare(Log log_mode, OpStart start, mxb::Json& error_o
             ServerOperation promotion(promotion_target, target_type,
                                       demotion_target->m_slave_status, demotion_target->m_enabled_events);
             GeneralOpData general(start, error_out, time_limit);
-            rval = std::make_unique<FailoverParams>(promotion, demotion_target, general);
+            auto operation = type == FailoverType::SAFE ? OperationType::FAILOVER_SAFE :
+                OperationType::FAILOVER;
+            rval = std::make_unique<FailoverParams>(promotion, demotion_target, general, operation);
         }
     }
     return rval;
@@ -1665,7 +1669,9 @@ void MariaDBMonitor::handle_auto_failover()
             // Failover is required, but first we should check if preconditions are met.
             Log log_mode = m_warn_failover_precond ? Log::ON : Log::OFF;
             mxb::Json dummy(mxb::Json::Type::UNDEFINED);
-            auto op = failover_prepare(log_mode, OpStart::AUTO, dummy);
+            auto failover_type = m_settings.auto_failover == AutoFailover::SAFE ? FailoverType::SAFE :
+                FailoverType::ALLOW_TRX_LOSS;
+            auto op = failover_prepare(failover_type, log_mode, OpStart::AUTO, dummy);
             if (op)
             {
                 m_warn_failover_precond = true;
@@ -2196,9 +2202,10 @@ MariaDBMonitor::SwitchoverParams::SwitchoverParams(ServerOperation promotion, Se
 
 MariaDBMonitor::FailoverParams::FailoverParams(ServerOperation promotion,
                                                const MariaDBServer* demotion_target,
-                                               const GeneralOpData& general)
+                                               const GeneralOpData& general, OperationType type)
     : promotion(move(promotion))
     , demotion_target(demotion_target)
     , general(general)
+    , type(type)
 {
 }

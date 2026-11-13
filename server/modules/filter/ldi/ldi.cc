@@ -26,9 +26,9 @@ namespace ldi
 constexpr const uint64_t CAPS = MXS_NO_MODULE_CAPABILITIES;
 
 cnf::Specification spec(MXB_MODULE_NAME, cnf::Specification::FILTER);
-cnf::ParamString key(
+cnf::ParamPassword key(
     &ldi::spec, "key", "S3 API key", "", cnf::Param::AT_RUNTIME);
-cnf::ParamString secret(
+cnf::ParamPassword secret(
     &ldi::spec, "secret", "S3 API secret", "", cnf::Param::AT_RUNTIME);
 cnf::ParamString region(
     &ldi::spec, "region", "S3 region", "us-east-1", cnf::Param::AT_RUNTIME);

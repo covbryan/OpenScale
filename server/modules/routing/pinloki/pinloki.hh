@@ -88,6 +88,13 @@ private:
 
     struct MasterConfig
     {
+        enum class LoadResult
+        {
+            LOADED,
+            NOT_FOUND,
+            ERROR
+        };
+
         bool        slave_running = false;
         std::string host;
         int64_t     port = 3306;
@@ -106,7 +113,7 @@ private:
         bool        ssl_verify_server_cert = false;
 
         void save(const Config& config) const;
-        bool load(const Config& config);
+        LoadResult load(const Config& config);
     };
 
     Config                  m_config;

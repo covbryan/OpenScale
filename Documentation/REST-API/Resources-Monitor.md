@@ -71,7 +71,7 @@ Get a single monitor.
             },
             "parameters": {
                 "assume_unique_hostnames": true,
-                "auto_failover": false,
+                "auto_failover": "false",
                 "auto_rejoin": false,
                 "backend_connect_attempts": 1,
                 "backend_connect_timeout": "3000ms",
@@ -237,7 +237,7 @@ Get all monitors.
                 },
                 "parameters": {
                     "assume_unique_hostnames": true,
-                    "auto_failover": false,
+                    "auto_failover": "false",
                     "auto_rejoin": false,
                     "backend_connect_attempts": 1,
                     "backend_connect_timeout": "3000ms",
